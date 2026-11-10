@@ -1,0 +1,137 @@
+rules_version = '2';
+
+// Gisto security rules. Credits, ranks and message counts are written only by
+// Cloud Functions (functions/src/index.ts); clients can never change them.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function myProfile() { return get(/databases/$(database)/documents/users/$(me())).data; }
+    function active() { return signedIn() && request.auth.token.email_verified == true && exists(/databases/$(database)/documents/users/$(me())) && myProfile().get('banned', false) != true; }
+    function validText(t) { return t is string && t.size() > 0 && t.size() <= 500; }
+
+    // Keep in sync with ROOMS in src/lib/constants.ts
+    function roomIds() { return ['lagos', 'abuja', 'ibadan', 'ph', 'diaspora', 'football', 'music', 'tech', 'campus', 'relationships']; }
+
+    // ---------- Usernames (uniqueness) ----------
+    match /usernames/{name} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['uid'])
+        && request.resource.data.uid == me()
+        && name.matches('^[a-z0-9_.]{3,16}$');
+      allow update, delete: if false; // deleteAccount function cleans up
+    }
+
+    // ---------- Profiles ----------
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create: if signedIn() && uid == me()
+        && request.resource.data.keys().hasOnly(['username', 'usernameLower', 'city', 'credits', 'msgsSent', 'blocked', 'acceptedTermsAt', 'createdAt', 'lastSeen'])
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[A-Za-z0-9_.]{3,16}$')
+        && request.resource.data.usernameLower == request.resource.data.username.lower()
+        && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.usernameLower)).data.uid == me()
+        && request.resource.data.city is string && request.resource.data.city.size() <= 40
+        && request.resource.data.credits == 0
+        && request.resource.data.msgsSent == 0
+        && request.resource.data.blocked == []
+        && request.resource.data.acceptedTermsAt == request.time;
+      // Users may only change their city, block list and last-seen time.
+      allow update: if signedIn() && uid == me()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['city', 'blocked', 'lastSeen'])
+        && request.resource.data.blocked is list && request.resource.data.blocked.size() <= 500;
+      allow delete: if false;
+
+      match /buddies/{other} {
+        allow read: if signedIn() && uid == me();
+        allow create: if active() && uid == me() && other != me()
+          && request.resource.data.keys().hasOnly(['username', 'addedAt'])
+          && request.resource.data.username is string
+          && exists(/databases/$(database)/documents/users/$(other));
+        allow delete: if signedIn() && uid == me();
+        allow update: if false;
+      }
+
+      match /private/{docId} {
+        allow read: if signedIn() && uid == me();
+        allow write: if signedIn() && uid == me() && docId == 'push'
+          && request.resource.data.keys().hasOnly(['token', 'updatedAt'])
+          && request.resource.data.token is string && request.resource.data.token.size() < 200;
+      }
+    }
+
+    // ---------- Rooms ----------
+    match /rooms/{roomId} {
+      match /messages/{msgId} {
+        allow read: if signedIn() && roomId in roomIds();
+        allow create: if active() && roomId in roomIds()
+          && request.resource.data.keys().hasOnly(['uid', 'username', 'text', 'createdAt'])
+          && request.resource.data.uid == me()
+          && request.resource.data.username == myProfile().username
+          && validText(request.resource.data.text)
+          && request.resource.data.createdAt == request.time;
+        allow update, delete: if false; // moderators delete from the Firebase console
+      }
+      match /presence/{uid} {
+        allow read: if signedIn();
+        allow delete: if signedIn() && uid == me();
+        allow create, update: if signedIn() && uid == me() && roomId in roomIds()
+          && request.resource.data.keys().hasOnly(['lastSeen']) && request.resource.data.lastSeen == request.time;
+      }
+    }
+
+    // ---------- Private chats ----------
+    // Chat id is "<smallerUid>_<largerUid>".
+    match /chats/{chatId} {
+      function isMember() { return signedIn() && me() in resource.data.members; }
+      function otherOf(m) { return m[0] == me() ? m[1] : m[0]; }
+      function notBlockedBy(otherUid) {
+        return !(me() in get(/databases/$(database)/documents/users/$(otherUid)).data.get('blocked', []));
+      }
+
+      allow get: if signedIn() && me() in chatId.split('_');
+      allow list: if signedIn() && me() in resource.data.members; // query must filter members array-contains me
+      allow create: if active()
+        && request.resource.data.members is list
+        && request.resource.data.members.size() == 2
+        && me() in request.resource.data.members
+        && request.resource.data.members[0] < request.resource.data.members[1]
+        && chatId == request.resource.data.members[0] + '_' + request.resource.data.members[1]
+        && exists(/databases/$(database)/documents/users/$(otherOf(request.resource.data.members)))
+        && notBlockedBy(otherOf(request.resource.data.members))
+        && request.resource.data.keys().hasOnly(['members', 'names', 'lastText', 'lastUid', 'lastAt', 'reads'])
+        && validText(request.resource.data.lastText)
+        && request.resource.data.lastUid == me();
+      allow update: if isMember()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastText', 'lastUid', 'lastAt', 'reads'])
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastText'])
+            || (validText(request.resource.data.lastText) && request.resource.data.lastUid == me() && active() && notBlockedBy(otherOf(resource.data.members))));
+      allow delete: if false;
+
+      match /messages/{msgId} {
+        function chat() { return get(/databases/$(database)/documents/chats/$(chatId)).data; }
+        allow read: if signedIn() && me() in chatId.split('_');
+        allow create: if active()
+          && me() in chat().members
+          && notBlockedBy(otherOf(chat().members))
+          && request.resource.data.keys().hasOnly(['uid', 'username', 'text', 'createdAt'])
+          && request.resource.data.uid == me()
+          && request.resource.data.username == myProfile().username
+          && validText(request.resource.data.text)
+          && request.resource.data.createdAt == request.time;
+        allow update, delete: if false;
+      }
+    }
+
+    // ---------- Reports (read in the Firebase console) ----------
+    match /reports/{id} {
+      allow create: if signedIn()
+        && request.resource.data.reporter == me()
+        && request.resource.data.reason is string && request.resource.data.reason.size() < 100
+        && request.resource.data.keys().hasOnly(['reporter', 'target', 'reason', 'messageText', 'messageId', 'where', 'status', 'createdAt']);
+      allow read, update, delete: if false;
+    }
+  }
+}
