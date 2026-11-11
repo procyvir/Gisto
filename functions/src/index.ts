@@ -2,7 +2,7 @@ import { initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { setGlobalOptions } from 'firebase-functions/v2';
-import { onDocumentCreated } from 'firebase-functions/v2/firestore';
+import { onDocumentCreated, onDocumentUpdated } from 'firebase-functions/v2/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
 import { logger } from 'firebase-functions';
 
@@ -44,37 +44,81 @@ export const onRoomMessage = onDocumentCreated('rooms/{roomId}/messages/{msgId}'
   if (typeof uid === 'string') await awardForMessage(uid);
 });
 
+// ---------- Push notifications (Expo push service) ----------
+type PushMsg = { title: string; body: string; data: Record<string, string> };
+
+// Sends to each recipient who has a push token and hasn't blocked the sender.
+async function pushTo(recipients: string[], senderUid: string, msg: PushMsg) {
+  const targets: { uid: string; token: string }[] = [];
+  for (const uid of recipients) {
+    if (uid === senderUid) continue;
+    const [user, push] = await Promise.all([db.doc(`users/${uid}`).get(), db.doc(`users/${uid}/private/push`).get()]);
+    if (!user.exists || (user.get('blocked') as string[] | undefined)?.includes(senderUid)) continue;
+    const token = push.get('token');
+    if (typeof token === 'string' && token.startsWith('ExponentPushToken')) targets.push({ uid, token });
+  }
+  for (let i = 0; i < targets.length; i += 100) {
+    const batch = targets.slice(i, i + 100);
+    try {
+      const res = await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(
+          batch.map((t) => ({ to: t.token, title: msg.title, body: msg.body, sound: 'default', channelId: 'messages', data: msg.data }))
+        ),
+      });
+      const out = (await res.json()) as { data?: { details?: { error?: string } }[] };
+      await Promise.all(
+        (out.data ?? []).map((r, j) =>
+          r.details?.error === 'DeviceNotRegistered' ? db.doc(`users/${batch[j].uid}/private/push`).delete() : null
+        )
+      );
+    } catch (e) {
+      logger.warn('push failed', e);
+    }
+  }
+}
+
 // ---------- Private messages: credits + push notification ----------
 export const onChatMessage = onDocumentCreated('chats/{chatId}/messages/{msgId}', async (event) => {
   const msg = event.data?.data();
   if (!msg || typeof msg.uid !== 'string') return;
   await awardForMessage(msg.uid);
-
   const chat = (await db.doc(`chats/${event.params.chatId}`).get()).data();
-  const to = (chat?.members as string[] | undefined)?.find((m) => m !== msg.uid);
-  if (!to) return;
-  const recipient = (await db.doc(`users/${to}`).get()).data();
-  if (!recipient || (recipient.blocked as string[] | undefined)?.includes(msg.uid)) return;
-  const token = (await db.doc(`users/${to}/private/push`).get()).get('token');
-  if (typeof token !== 'string' || !token.startsWith('ExponentPushToken')) return;
+  const members = (chat?.members as string[] | undefined) ?? [];
+  await pushTo(members, msg.uid, {
+    title: msg.username,
+    body: String(msg.text).slice(0, 140),
+    data: { type: 'chat', uid: msg.uid, username: msg.username },
+  });
+});
 
-  try {
-    const res = await fetch('https://exp.host/--/api/v2/push/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({
-        to: token,
-        title: msg.username,
-        body: String(msg.text).slice(0, 140),
-        sound: 'default',
-        channelId: 'messages',
-        data: { type: 'chat', uid: msg.uid, username: msg.username },
-      }),
-    });
-    const out = (await res.json()) as { data?: { status?: string; details?: { error?: string } } };
-    if (out.data?.details?.error === 'DeviceNotRegistered') await db.doc(`users/${to}/private/push`).delete();
-  } catch (e) {
-    logger.warn('push failed', e);
+// ---------- Group messages: credits + push to members ----------
+export const onGroupMessage = onDocumentCreated('groups/{groupId}/messages/{msgId}', async (event) => {
+  const msg = event.data?.data();
+  if (!msg || typeof msg.uid !== 'string') return;
+  await awardForMessage(msg.uid);
+  const group = (await db.doc(`groups/${event.params.groupId}`).get()).data();
+  if (!group) return;
+  await pushTo((group.members as string[]) ?? [], msg.uid, {
+    title: String(group.name),
+    body: `${msg.username}: ${String(msg.text).slice(0, 120)}`,
+    data: { type: 'group', groupId: event.params.groupId },
+  });
+});
+
+// ---------- Groups: keep an admin when the last admin leaves ----------
+export const onGroupUpdated = onDocumentUpdated('groups/{groupId}', async (event) => {
+  const after = event.data?.after.data();
+  if (!after) return;
+  const members = (after.members as string[]) ?? [];
+  const admins = ((after.admins as string[]) ?? []).filter((a) => members.includes(a));
+  if (members.length === 0) {
+    await db.recursiveDelete(event.data!.after.ref); // everyone left
+  } else if (admins.length === 0) {
+    await event.data!.after.ref.update({ admins: [members[0]], ownerUid: members[0] });
+  } else if (!members.includes(after.ownerUid)) {
+    await event.data!.after.ref.update({ ownerUid: admins[0] });
   }
 });
 
@@ -122,6 +166,15 @@ export const deleteAccount = onCall(async (req) => {
   }
   const chats = await db.collection('chats').where('members', 'array-contains', uid).get();
   for (const c of chats.docs) await c.ref.update({ [`names.${uid}`]: 'Deleted user' });
+
+  // Leave every group (onGroupUpdated hands admin to someone else).
+  const groups = await db.collection('groups').where('members', 'array-contains', uid).get();
+  for (const g of groups.docs)
+    await g.ref.update({
+      members: FieldValue.arrayRemove(uid),
+      admins: FieldValue.arrayRemove(uid),
+      [`memberNames.${uid}`]: FieldValue.delete(),
+    });
 
   // Remove this user from other people's buddy lists.
   const asBuddy = await db.collectionGroup('buddies').where('username', '==', user?.username ?? '__none__').get();

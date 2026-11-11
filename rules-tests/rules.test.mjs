@@ -73,3 +73,33 @@ test('unverified email cannot post', async () => {
   const db = env.authenticatedContext(A, { email_verified: false }).firestore();
   await assertFails(addDoc(collection(db, 'rooms', 'lagos', 'messages'), { uid: A, username: 'Ade', text: 'hi', createdAt: serverTimestamp() }));
 });
+
+test('groups: create, post, admin powers, leave', async () => {
+  const C3 = 'ccc';
+  await env.withSecurityRulesDisabled((ctx) =>
+    setDoc(doc(ctx.firestore(), 'users', C3), { username: 'Chidi', usernameLower: 'chidi', city: 'Lagos', credits: 0, msgsSent: 0, blocked: [] })
+  );
+  const a = as(A), b = as(B), outsider = as(C3);
+  const g = doc(a, 'groups', 'g1');
+  await assertSucceeds(setDoc(g, {
+    name: 'Squad', ownerUid: A, admins: [A], members: [A, B], memberNames: { [A]: 'Ade', [B]: 'Bola' },
+    lastText: 'Ade created the group', lastUid: A, lastAt: serverTimestamp(), reads: {}, createdAt: serverTimestamp(),
+  }));
+  // can't make yourself owner of someone else's group
+  await assertFails(setDoc(doc(b, 'groups', 'g2'), {
+    name: 'Fake', ownerUid: A, admins: [A], members: [A, B], memberNames: {}, createdAt: serverTimestamp(),
+  }));
+  await assertSucceeds(addDoc(collection(b, 'groups', 'g1', 'messages'), { uid: B, username: 'Bola', text: 'hey', createdAt: serverTimestamp() }));
+  await assertFails(addDoc(collection(outsider, 'groups', 'g1', 'messages'), { uid: C3, username: 'Chidi', text: 'let me in', createdAt: serverTimestamp() }));
+  await assertFails(getDoc(doc(outsider, 'groups', 'g1')));
+  // non-admin can't add people or rename
+  await assertFails(updateDoc(doc(b, 'groups', 'g1'), { members: [A, B, C3] }));
+  await assertFails(updateDoc(doc(b, 'groups', 'g1'), { name: 'Mine now' }));
+  // admin can
+  await assertSucceeds(updateDoc(g, { members: [A, B, C3], memberNames: { [A]: 'Ade', [B]: 'Bola', [C3]: 'Chidi' } }));
+  await assertSucceeds(updateDoc(g, { name: 'Squad 2' }));
+  // member can't remove someone else, but can leave
+  await assertFails(updateDoc(doc(b, 'groups', 'g1'), { members: [A, B] }));
+  await assertSucceeds(updateDoc(doc(b, 'groups', 'g1'), { members: [A, C3] }));
+  await assertFails(addDoc(collection(b, 'groups', 'g1', 'messages'), { uid: B, username: 'Bola', text: 'still here?', createdAt: serverTimestamp() }));
+});

@@ -38,6 +38,14 @@ export function Avatar({ name, size = 40, online }: { name: string; size?: numbe
   );
 }
 
+export function GroupIcon({ name, size = 40 }: { name: string; size?: number }) {
+  return (
+    <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: '#2b4a3a', alignItems: 'center', justifyContent: 'center' }}>
+      <Text style={{ color: C.text, fontWeight: '800', fontSize: size * 0.38 }}>{(name[0] || '#').toUpperCase()}</Text>
+    </View>
+  );
+}
+
 export function Badge({ children, color = C.gold }: { children: ReactNode; color?: string }) {
   return (
     <View style={s.badge}>

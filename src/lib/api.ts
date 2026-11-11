@@ -4,6 +4,7 @@ import {
   arrayUnion,
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getCountFromServer,
   getDoc,
@@ -235,4 +236,117 @@ export async function claimDailyBonus(): Promise<{ awarded: number }> {
 
 export async function deleteMyAccount() {
   await httpsCallable(functions, 'deleteAccount')({});
+}
+
+// ---------- Group chats ----------
+export const MAX_GROUP = 50;
+
+export type Group = {
+  id: string;
+  name: string;
+  ownerUid: string;
+  admins: string[];
+  members: string[];
+  memberNames: Record<string, string>;
+  lastText?: string;
+  lastUid?: string;
+  lastAt?: Timestamp;
+  reads?: Record<string, Timestamp>;
+};
+
+export function watchGroups(uid: string, cb: (g: Group[]) => void) {
+  const q = query(collection(db, 'groups'), where('members', 'array-contains', uid), orderBy('lastAt', 'desc'), limit(50));
+  return onSnapshot(q, (s) => cb(s.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Group, 'id'>) }))));
+}
+
+export function watchGroup(id: string, cb: (g: Group | null) => void) {
+  return onSnapshot(
+    doc(db, 'groups', id),
+    (s) => cb(s.exists() ? ({ id: s.id, ...(s.data() as Omit<Group, 'id'>) }) : null),
+    () => cb(null) // no longer a member
+  );
+}
+
+export async function createGroup(me: Profile, name: string, people: { uid: string; username: string }[]) {
+  const clean = cleanText(name.trim()).slice(0, 40);
+  const members = [me.uid, ...people.map((p) => p.uid).filter((u) => u !== me.uid)];
+  const memberNames: Record<string, string> = { [me.uid]: me.username };
+  people.forEach((p) => (memberNames[p.uid] = p.username));
+  const text = `${me.username} created the group`;
+  const ref = await addDoc(collection(db, 'groups'), {
+    name: clean,
+    ownerUid: me.uid,
+    admins: [me.uid],
+    members,
+    memberNames,
+    lastText: text,
+    lastUid: me.uid,
+    lastAt: serverTimestamp(),
+    reads: { [me.uid]: serverTimestamp() },
+    createdAt: serverTimestamp(),
+  });
+  return ref.id;
+}
+
+export function watchGroupMessages(groupId: string, cb: (m: Message[]) => void) {
+  const q = query(collection(db, 'groups', groupId, 'messages'), orderBy('createdAt', 'desc'), limit(80));
+  return onSnapshot(
+    q,
+    (s) => cb(s.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Message, 'id'>) })).reverse()),
+    () => cb([])
+  );
+}
+
+export async function sendGroupMessage(groupId: string, me: Profile, raw: string) {
+  const text = cleanText(raw.trim()).slice(0, MAX_MESSAGE);
+  if (!text) return;
+  await addDoc(collection(db, 'groups', groupId, 'messages'), {
+    uid: me.uid,
+    username: me.username,
+    text,
+    createdAt: serverTimestamp(),
+  });
+  await updateDoc(doc(db, 'groups', groupId), {
+    lastText: `${me.username}: ${text}`.slice(0, 120),
+    lastUid: me.uid,
+    lastAt: serverTimestamp(),
+    [`reads.${me.uid}`]: serverTimestamp(),
+  }).catch(() => {});
+}
+
+export function markGroupRead(groupId: string, uid: string) {
+  return updateDoc(doc(db, 'groups', groupId), { [`reads.${uid}`]: serverTimestamp() }).catch(() => {});
+}
+
+export function renameGroup(g: Group, name: string) {
+  return updateDoc(doc(db, 'groups', g.id), { name: cleanText(name.trim()).slice(0, 40) });
+}
+
+export function addGroupMembers(g: Group, people: { uid: string; username: string }[]) {
+  const fresh = people.filter((p) => !g.members.includes(p.uid));
+  if (!fresh.length) return Promise.resolve();
+  if (g.members.length + fresh.length > MAX_GROUP) throw new Error(`Groups can have up to ${MAX_GROUP} members.`);
+  const update: Record<string, unknown> = { members: arrayUnion(...fresh.map((p) => p.uid)) };
+  fresh.forEach((p) => (update[`memberNames.${p.uid}`] = p.username));
+  return updateDoc(doc(db, 'groups', g.id), update);
+}
+
+export function removeGroupMember(g: Group, uid: string) {
+  return updateDoc(doc(db, 'groups', g.id), {
+    members: arrayRemove(uid),
+    admins: arrayRemove(uid),
+    [`memberNames.${uid}`]: deleteField(),
+  });
+}
+
+export function setGroupAdmin(g: Group, uid: string, admin: boolean) {
+  return updateDoc(doc(db, 'groups', g.id), { admins: admin ? arrayUnion(uid) : arrayRemove(uid) });
+}
+
+export const leaveGroup = (g: Group, uid: string) => removeGroupMember(g, uid);
+
+export function isGroupUnread(g: Group, uid: string) {
+  if (!g.lastAt || g.lastUid === uid) return false;
+  const r = g.reads?.[uid];
+  return !r || r.toMillis() < g.lastAt.toMillis();
 }

@@ -125,6 +125,65 @@ service cloud.firestore {
       }
     }
 
+    // ---------- Group chats ----------
+    // Up to 50 members. Admins rename, add and remove; anyone can leave.
+    // Credits, push and admin handover are handled in functions/src/index.ts.
+    match /groups/{groupId} {
+      function isMember() { return signedIn() && me() in resource.data.members; }
+      function isAdmin() { return signedIn() && me() in resource.data.admins; }
+      function validName(n) { return n is string && n.size() >= 1 && n.size() <= 40; }
+      function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+      function newMembers() { return request.resource.data.members; }
+
+      allow get: if isMember();
+      allow list: if signedIn() && me() in resource.data.members; // query must filter members array-contains me
+
+      allow create: if active()
+        && request.resource.data.keys().hasOnly(['name', 'ownerUid', 'admins', 'members', 'memberNames', 'lastText', 'lastUid', 'lastAt', 'reads', 'createdAt'])
+        && validName(request.resource.data.name)
+        && request.resource.data.ownerUid == me()
+        && request.resource.data.admins == [me()]
+        && newMembers() is list && me() in newMembers()
+        && newMembers().size() >= 2 && newMembers().size() <= 50
+        && newMembers().toSet().size() == newMembers().size()
+        && request.resource.data.memberNames is map
+        && request.resource.data.createdAt == request.time;
+
+      allow update: if
+        // 1. Any member: post preview / read markers
+        (isMember() && changed().hasOnly(['lastText', 'lastUid', 'lastAt', 'reads'])
+          && (!changed().hasAny(['lastText'])
+              || (active() && validText(request.resource.data.lastText) && request.resource.data.lastUid == me())))
+        // 2. Admin: rename, add/remove members, promote admins
+        || (isAdmin() && active()
+          && changed().hasOnly(['name', 'members', 'memberNames', 'admins', 'lastText', 'lastUid', 'lastAt'])
+          && validName(request.resource.data.name)
+          && newMembers().size() >= 1 && newMembers().size() <= 50
+          && newMembers().toSet().size() == newMembers().size()
+          && resource.data.ownerUid in newMembers()                       // admins can't remove the owner
+          && resource.data.ownerUid in request.resource.data.admins       // or demote them
+          && newMembers().toSet().hasAll(request.resource.data.admins.toSet()))
+        // 3. Any member: leave (remove only yourself)
+        || (isMember()
+          && changed().hasOnly(['members', 'memberNames', 'admins'])
+          && newMembers().toSet() == resource.data.members.toSet().difference([me()].toSet())
+          && request.resource.data.admins.toSet() == resource.data.admins.toSet().difference([me()].toSet()));
+      allow delete: if false;
+
+      match /messages/{msgId} {
+        function group() { return get(/databases/$(database)/documents/groups/$(groupId)).data; }
+        allow read: if signedIn() && me() in group().members;
+        allow create: if active()
+          && me() in group().members
+          && request.resource.data.keys().hasOnly(['uid', 'username', 'text', 'createdAt'])
+          && request.resource.data.uid == me()
+          && request.resource.data.username == myProfile().username
+          && validText(request.resource.data.text)
+          && request.resource.data.createdAt == request.time;
+        allow update, delete: if false;
+      }
+    }
+
     // ---------- Reports (read in the Firebase console) ----------
     match /reports/{id} {
       allow create: if signedIn()

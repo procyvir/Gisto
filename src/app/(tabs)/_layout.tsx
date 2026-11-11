@@ -30,6 +30,7 @@ export default function TabsLayout() {
     >
       <Tabs.Screen name="index" options={{ title: 'Rooms', tabBarIcon: icon('💬') }} />
       <Tabs.Screen name="buddies" options={{ title: 'Buddies', tabBarIcon: icon('👥') }} />
+      <Tabs.Screen name="groups" options={{ title: 'Groups', tabBarIcon: icon('🫂') }} />
       <Tabs.Screen name="me" options={{ title: 'Me', tabBarIcon: icon('⭐') }} />
     </Tabs>
   );

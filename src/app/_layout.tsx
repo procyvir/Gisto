@@ -31,6 +31,9 @@ function RootStack() {
         <Stack.Screen name="chat/[uid]" options={{ title: 'Chat' }} />
         <Stack.Screen name="user/[uid]" options={{ title: 'Profile', presentation: 'modal' }} />
         <Stack.Screen name="blocked" options={{ title: 'Blocked users' }} />
+        <Stack.Screen name="group/new" options={{ title: 'New group' }} />
+        <Stack.Screen name="group/[id]" options={{ title: 'Group' }} />
+        <Stack.Screen name="group-info/[id]" options={{ title: 'Group info' }} />
       </Stack.Protected>
       <Stack.Screen name="terms" options={{ title: 'Community rules & terms' }} />
     </Stack>

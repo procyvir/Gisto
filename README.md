@@ -11,6 +11,7 @@ real-time chat, and server logic.
 | Live chat rooms (10 rooms, with online counts) | `src/app/room/[id].tsx` |
 | Buddies, online/offline status, user search | `src/app/(tabs)/buddies.tsx` |
 | Private chats with unread markers and push notifications | `src/app/chat/[uid].tsx`, `functions/src/index.ts` |
+| Group chats (up to 50, admins, add/remove, leave, push to members) | `src/app/(tabs)/groups.tsx`, `src/app/group/`, `src/app/group-info/` |
 | Credits and ranks (Fresh → Regular → Gister → Influencer → Oga → Odogwu) | `functions/src/index.ts`, `src/app/(tabs)/me.tsx` |
 | Report, block, word filter, ban, community rules (App Store guideline 1.2) | `src/app/user/[uid].tsx`, `src/lib/filter.ts`, `firestore.rules` |
 | In-app account deletion (required by Apple and Google) | `deleteAccount` function, Me tab |
@@ -133,7 +134,8 @@ eas.json            build profiles for the stores
 - **Credits:** amounts and the daily cap are at the top of `functions/src/index.ts`. Rank thresholds are
   `RANKS` in `src/lib/constants.ts`.
 - **Word filter:** `src/lib/filter.ts`.
+- **Group size:** `MAX_GROUP` in `src/lib/api.ts` **and** the `50` limits in the groups section of `firestore.rules`.
 
 ## Ideas for version 2
-Phone-number login, photo sharing (needs image moderation), group chats, buddy requests that need
+Phone-number login, photo sharing (needs image moderation), group invite links, buddy requests that need
 approval, room moderators, and Firebase App Check to block scripted abuse.
